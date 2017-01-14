@@ -87,3 +87,13 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# data files
+train_data/
+val_data/
+data/
+
+logs/
+checkpoints/
+
+*.DS_Store
