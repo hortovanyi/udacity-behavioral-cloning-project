@@ -7,6 +7,7 @@ import socketio
 import eventlet
 import eventlet.wsgi
 import time
+import cv2
 from PIL import Image
 from PIL import ImageOps
 from flask import Flask, render_template
@@ -48,6 +49,7 @@ def telemetry(sid, data):
     imgString = data["image"]
     image = Image.open(BytesIO(base64.b64decode(imgString)))
     image_array = np.asarray(image)
+    image_array = cv2.cvtColor(image_array, cv2.COLOR_RGB2YUV)
     image_array = crop_camera(image_array)
     transformed_image_array = image_array[None, :, :, :]
 

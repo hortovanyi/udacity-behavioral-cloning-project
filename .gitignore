@@ -92,6 +92,7 @@ ENV/
 train_data/
 val_data/
 data/
+datat2/
 
 logs/
 checkpoints/
