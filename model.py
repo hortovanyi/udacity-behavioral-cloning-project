@@ -8,7 +8,7 @@ import random
 from pathlib import PurePosixPath
 from keras.models import Sequential
 
-from keras.layers import Dense, Dropout, Activation, Flatten, Lambda
+from keras.layers import Dense, Dropout, Activation, Flatten, Lambda, ELU
 from keras.layers import Convolution2D, MaxPooling2D
 from keras.optimizers import Adam
 from keras.utils import np_utils
@@ -29,59 +29,68 @@ flags.DEFINE_string('validation_log_path', '',
                     "Directory where validation driving_log.csv can be found")
 flags.DEFINE_integer('epochs', 20, "The number of epochs.")
 flags.DEFINE_integer('batch_size', 128, "The batch size.")
-flags.DEFINE_integer('dropout', .50, "Keep dropout probabilities.")
+flags.DEFINE_float('dropout', .50, "Keep dropout probabilities for nvidia model.")
+flags.DEFINE_string('cnn_model', 'nvidia',
+                    "cnn model either nvidia or commaai")
 
 cameras = ['left', 'center', 'right']
 camera_centre = ['center']
-steering_adj = {'left': 0.25, 'center': 0., 'right': -0.25}
+steering_adj = {'left': 0.25, 'center': 0., 'right': -.25}
 
 # cameras = ['center']
 # vehicle_controls = ['steering', 'throttle', 'brake']
 vehicle_controls = ['steering']
 
 
+# load image and convert to RGB
+def load_image(log_path, filename):
+    filename = filename.strip()
+    if filename.startswith('IMG'):
+        filename = log_path+'/'+filename
+    else:
+        # load it relative to where log file is now, not whats in it
+        filename = log_path+'/IMG/'+PurePosixPath(filename).name
+    img = cv2.imread(filename)
+    # return cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # return cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
+
+
+def crop_camera(img, crop_height=66, crop_width=200):
+    height = img.shape[0]
+    width = img.shape[1]
+
+    # y_start = 60+random.randint(-10, 10)
+    # x_start = int(width/2)-int(crop_width/2)+random.randint(-40, 40)
+    y_start = 60
+    x_start = int(width/2)-int(crop_width/2)
+
+    return img[y_start:y_start+crop_height, x_start:x_start+crop_width]
+
+
 def load_data(log_path='./data', log_file='driving_log.csv', skiprows=1,
-              cameras=cameras, sample_every=1, filter_straights=False):
-    """
-    Utility function to load data and images.
+              cameras=cameras, sample_every=1, total_count=30000,
+              filter_straights=False,
+              crop_image=True):
 
-    Arguments:
-        log_path - String (defaults './data')
-        log_file - String (defaults 'driving_log.csv')
-        skiprows - Int
-
-    Returns:
-
-    """
     # initialise data extract
     features = []
     labels = []
 
-    def crop_camera(img, crop_height=66, crop_width=200):
-        height = img.shape[0]
-        width = img.shape[1]
+    # used this routine from https://github.com/mvpcom/Udacity-CarND-Project-3
+    def jitter_image_rotation(image, steering):
+        rows, cols, _ = image.shape
+        transRange = 100
+        numPixels = 10
+        valPixels = 0.4
+        transX = transRange * np.random.uniform() - transRange/2
+        steering = steering + transX/transRange * 2 * valPixels
+        transY = numPixels * np.random.uniform() - numPixels/2
+        transMat = np.float32([[1, 0, transX], [0, 1, transY]])
+        image = cv2.warpAffine(image, transMat, (cols, rows))
+        return image, steering
 
-        # y_start = 60+random.randint(-10, 10)
-        # x_start = int(width/2)-int(crop_width/2)+random.randint(-40, 40)
-        y_start = 60
-        x_start = int(width/2)-int(crop_width/2)
-
-        return img[y_start:y_start+crop_height, x_start:x_start+crop_width]
-
-    # load image and convert to RGB
-    def load_image(filename):
-        filename = filename.strip()
-        if filename.startswith('IMG'):
-            filename = log_path+'/'+filename
-        else:
-            # load it relative to where log file is now, not whats in it
-            filename = log_path+'/IMG/'+PurePosixPath(filename).name
-        img = cv2.imread(filename)
-        # return cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        # return cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
-
-    def filter_driving_straight(data_df, hist_items=4):
+    def filter_driving_straight(data_df, hist_items=5):
         print('filtering straight line driving with %d frames consective' %
               hist_items)
         steering_history = deque([])
@@ -102,62 +111,31 @@ def load_data(log_path='./data', log_file='driving_log.csv', skiprows=1,
 
         return data_df.drop(data_df.index[drop_rows])
 
-    def augment_data(data_df):
-        mu = 0
-        sigma = 0.2
-
-        zero_total = len(data_df.loc[data_df['steering'] == 0.0])
-        print("zero angle total: ", zero_total)
-
-        bin_len = 75
-        # bins with values from -1 to 1
-        bin = np.linspace(-1, 1, bin_len)
-
-        # middle bin is 0.0 steering angle
-        assert bin[int(bin_len/2)] == 0.0
-
-        for b in range(len(bin)):
-            # select rows for this bin
-            if bin[b] == 0.0:
-                bd_count = zero_total
-                bd_df = data_df[data_df['steering'] == 0.0]
-            elif bin[b] < 0.0:
-                bd_df = data_df[data_df['steering'].
-                                between(bin[b], bin[b+1]-0.0001)]
-                bd_count = len(bd_df)
-            else:
-                bd_df = data_df[data_df['steering'].
-                                between(bin[b-1]+0.0001, bin[b])]
-                bd_count = len(bd_df)
-
-            # work how many require for a gausian distribution
-            if b == int(bin_len/2):
-                bd_desired = zero_total
-            else:
-                bd_desired = int((zero_total/2.)
-                                 * norm.pdf(bin[b], mu, sigma))
-
-            print("bin[%.2d] steering: %f count: %d desired: %d"
-                  % (b, bin[b], bd_count, bd_desired))
-
-            # append extra rows
-            bd_needed = bd_desired - bd_count
-            if bd_needed > 0 and bd_count > 0:
-                bd_df = bd_df.sample(frac=(1.*bd_desired/bd_count),
-                                     replace=True)
-
-            # 1st time through save the dataframe for later bins to append
-            if b == 0:
-                final_df = bd_df
-
-            else:
-                final_df = final_df.append(bd_df, ignore_index=True)
-
-        return final_df
-
     def append_features_labels(image, controls):
         features.append(image)
         labels.append(controls)
+
+    def gen_camera_image(row):
+        # controls = [getattr(row, control) for control in vehicle_controls]
+        steering = getattr(row, 'steering')
+
+        # use one of the cameras randomily
+        camera = cameras[random.randint(0, len(cameras)-1)]
+        steering += steering_adj[camera]
+
+        image = load_image(log_path, getattr(row, camera))
+
+        image, steering = jitter_image_rotation(image, steering)
+
+        if crop_image:
+            image = crop_camera(image)
+
+        # flip 50% randomily
+        if random.random() >= .5:
+            image = cv2.flip(image, 1)
+            steering = -steering
+
+        return image, steering
 
     # load and iterate over the csv log file
     print("Cameras: ", cameras)
@@ -168,39 +146,70 @@ def load_data(log_path='./data', log_file='driving_log.csv', skiprows=1,
                     'steering', 'throttle', 'brake', 'speed']
     data_df = pd.read_csv(log_path+'/'+log_file,
                           names=column_names, skiprows=skiprows)
-    # filter out stright line stretches
+
+    # filter out straight line stretches
     if filter_straights:
         data_df = filter_driving_straight(data_df)
 
-    data_df = augment_data(data_df)
+    print("Iterating with %d rows, sampling every %d, generating %d images."
+          % (len(data_df), sample_every, total_count))
 
-    print(data_df.describe())
+    # loop through a few times
+    i = 0
+    while i < total_count:
+        for row in data_df.itertuples():
+            # if this is not a row to sample then next
+            if getattr(row, 'Index') % sample_every:
+                continue
 
-    print("Iterating with %d rows, sampling every %d."
-          % (len(data_df), sample_every))
+            image, steering = gen_camera_image(row)
+
+            # append_features_labels(image, one_over_r(steering))
+            append_features_labels(image, steering)
+
+            # increment counter
+            i += 1
+
+    data = {'features': np.array(features),
+            'labels': np.array(labels)}
+    return data
+
+
+def load_val_data(log_path='/u200/Udacity/behavioral-cloning-project/data',
+                  log_file='driving_log.csv', camera=camera_centre,
+                  crop_image=True, skiprows=1):
+
+    def append_features_labels(image, controls):
+        features.append(image)
+        labels.append(controls)
+
+    # initialise data extract
+    features = []
+    labels = []
+
+    print("Camera: ", camera)
+    print("Log path: ", log_path)
+    print("Log file: ", log_file)
+
+    column_names = ['center', 'left', 'right',
+                    'steering', 'throttle', 'brake', 'speed']
+    data_df = pd.read_csv(log_path+'/'+log_file,
+                          names=column_names, skiprows=skiprows)
+    print("Iterating with %d rows."
+          % (len(data_df)))
 
     for row in data_df.itertuples():
-        # if this is not a row to sample then next
-        if getattr(row, 'Index') % sample_every:
-            continue
-
-        # controls = [getattr(row, control) for control in vehicle_controls]
         steering = getattr(row, 'steering')
 
-        # use one of the cameras randomily
-        camera = cameras[random.randint(0, len(cameras)-1)]
+        # adjust steering if not center
+        steering += steering_adj[camera]
 
-        image = load_image(getattr(row, camera))
-        image = crop_camera(image)
+        image = load_image(log_path, getattr(row, camera))
 
-        # append_features_labels(image, controls)
-        steering = steering+steering_adj[camera]
+        if crop_image:
+            image = crop_camera(image)
 
-        # flip 50% randomily
-        if random.random() >= .5:
-            image = cv2.flip(image, 1)
-            steering = -steering
-
+        # append_features_labels(image, one_over_r(steering))
         append_features_labels(image, steering)
 
     data = {'features': np.array(features),
@@ -208,31 +217,60 @@ def load_data(log_path='./data', log_file='driving_log.csv', skiprows=1,
     return data
 
 
-def load_train_val_data(training_log_path, validation_log_path):
+def load_train_val_data(training_log_path, validation_log_path,
+                        crop_image=True):
     print("loading training data ...")
     train_data = load_data(training_log_path, sample_every=1,
                            filter_straights=True,
                            # cameras=camera_centre)
-                           cameras=cameras)
+                           cameras=camera_centre, crop_image=crop_image)
 
-    X_train, X_val, y_train, y_val = train_test_split(train_data['features'],
-                                                      train_data['labels'],
-                                                      test_size=0.20,
-                                                      random_state=737987)
-    # X_train = train_data['features']
-    # y_train = train_data['labels']
-    #
-    # print("loading valdiation data ...")
-    # validation_data = load_data(validation_log_path, cameras=camera_centre,
-    #                             filter_straights=False)
-    # # validation_data = load_data(validation_log_path)
-    # X_val = validation_data['features']
-    # y_val = validation_data['labels']
+    # X_train, X_val, y_train, y_val = train_test_split(train_data['features'],
+    #                                                   train_data['labels'],
+    #                                                   test_size=0.20,
+    #                                                   random_state=737987)
+    X_train = train_data['features']
+    y_train = train_data['labels']
+
+    print("loading valdiation data ...")
+    validation_data = load_val_data(validation_log_path,
+                                    camera=camera_centre[0],
+                                    crop_image=crop_image)
+    X_val = validation_data['features']
+    y_val = validation_data['labels']
 
     return X_train, y_train, X_val, y_val
 
 
-def build_model(img_height=66, img_width=200, img_channels=3, dropout=.4):
+def build_commaai_model():
+    ch, row, col = 3, 160, 320  # camera format
+
+    model = Sequential()
+    model.add(Lambda(lambda x: x/127.5 - 1.,
+                     #  input_shape=(ch, row, col),
+                     #  output_shape=(ch, row, col)))
+                     input_shape=(row, col, ch),
+                     output_shape=(row, col, ch)))
+    model.add(Convolution2D(16, 8, 8, subsample=(4, 4), border_mode="same"))
+    model.add(ELU())
+    model.add(Convolution2D(32, 5, 5, subsample=(2, 2), border_mode="same"))
+    model.add(ELU())
+    model.add(Convolution2D(64, 5, 5, subsample=(2, 2), border_mode="same"))
+    model.add(Flatten())
+    model.add(Dropout(.2))
+    model.add(ELU())
+    model.add(Dense(512))
+    model.add(Dropout(.5))
+    model.add(ELU())
+    model.add(Dense(1))
+
+    model.compile(optimizer="adam", loss="mse")
+
+    return model
+
+
+def build_nvidia_model(img_height=66, img_width=200, img_channels=3,
+                       dropout=.4):
 
     img_shape = (img_height, img_width, img_channels)
 
@@ -241,7 +279,7 @@ def build_model(img_height=66, img_width=200, img_channels=3, dropout=.4):
     same, valid = ('same', 'valid')
     padding = [valid, valid, valid, valid, valid]
     strides = [(2, 2), (2, 2), (2, 2), (1, 1), (1, 1)]
-    pool_size = (1, 1)
+    pool_size = (2, 2)
 
     model = Sequential()
     model.add(Lambda(lambda x: x * 1./127.5 - 1,
@@ -257,17 +295,17 @@ def build_model(img_height=66, img_width=200, img_channels=3, dropout=.4):
         model.add(Dropout(dropout))
 
     model.add(Flatten())
-    model.add(Dropout(dropout))
 
-    neurons = [100, 50, 10, 1]
+    neurons = [100, 50, 10]
     for l in range(len(neurons)):
         model.add(Dense(neurons[l], activation='elu'))
+        model.add(Dropout(dropout))
 
-    model.add(Dropout(dropout))
+    model.add(Dense(1, activation='elu', name='Out'))
+
     optimizer = Adam(lr=0.001)
     model.compile(optimizer=optimizer,
-                  loss='mse',
-                  metrics=['accuracy'])
+                  loss='mse')
     return model
 
 
@@ -291,34 +329,47 @@ def get_val_generator(X_data, y_data):
     datagen = ImageDataGenerator(
         # rescale=1./255
         )
-    return datagen.flow(X_data, y_data, batch_size=FLAGS.batch_size)
+    return datagen.flow(X_data, y_data, shuffle=True,
+                        batch_size=FLAGS.batch_size)
 
 
 def get_callbacks():
-    # checkpoint = ModelCheckpoint(
-    #     "checkpoints/weights.{epoch:02d}-{val_loss:.2f}.hdf5",
-    #     monitor='val_loss', verbose=0, save_best_only=False,
-    #     save_weights_only=True, mode='auto', period=1)
+    checkpoint = ModelCheckpoint(
+        "checkpoints/model-{val_loss:.4f}.h5",
+        monitor='val_loss', verbose=1, save_weights_only=True,
+        save_best_only=True)
+
     # tensorboard = TensorBoard(log_dir='./logs', histogram_freq=0,
     #                           write_graph=True, write_images=False)
 
     # return [checkpoint, tensorboard]
 
     earlystopping = EarlyStopping(monitor='val_loss', min_delta=0,
-                                  patience=0, verbose=0, mode='auto')
-    return [earlystopping]
+                                  patience=3, verbose=0, mode='auto')
+    return [earlystopping, checkpoint]
 
 
 def main(_):
+
+    cnn_model = FLAGS.cnn_model
+
+    crop_image = False
+    if cnn_model == 'nvidia':
+        crop_image = True
+
     # load bottleneck data
     X_train, y_train, X_val, y_val = load_train_val_data(
-        FLAGS.training_log_path, FLAGS.validation_log_path)
+        FLAGS.training_log_path, FLAGS.validation_log_path,
+        crop_image=crop_image)
 
     print(X_train.shape, y_train.shape)
     print(X_val.shape, y_val.shape)
 
     # build model and display layers
-    model = build_model(dropout=FLAGS.dropout)
+    if cnn_model == 'nvidia':
+        model = build_nvidia_model(dropout=FLAGS.dropout)
+    else:
+        model = build_commaai_model()
     # for l in model.layers:
     #     print(l.name, l.input_shape, l.output_shape,
     #           l.activation if hasattr(l, 'activation') else 'none')
@@ -328,7 +379,7 @@ def main(_):
 
     model.fit_generator(
         get_train_generator(X_train, y_train),
-        samples_per_epoch=len(X_train)*3,
+        samples_per_epoch=len(X_train),
         nb_epoch=FLAGS.epochs,
         callbacks=get_callbacks(),
         validation_data=get_val_generator(X_val, y_val),
