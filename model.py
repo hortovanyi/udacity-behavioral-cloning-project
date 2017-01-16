@@ -27,13 +27,13 @@ flags.DEFINE_string('training_log_path', './data',
                     "Directroy where training driving_log.csv can be found")
 flags.DEFINE_string('validation_log_path', '',
                     "Directory where validation driving_log.csv can be found")
-flags.DEFINE_integer('epochs', 20, "The number of epochs.")
-flags.DEFINE_integer('batch_size', 256, "The batch size.")
+flags.DEFINE_integer('epochs', 5, "The number of epochs.")
+flags.DEFINE_integer('batch_size', 1000, "The batch size.")
 flags.DEFINE_integer('training_size', 30000,
                      "The number of training samples per epoch")
 flags.DEFINE_integer('validation_size', 5000,
                      "The number of validation samples per epoch")
-flags.DEFINE_float('dropout', .50,
+flags.DEFINE_float('dropout', .60,
                    "Keep dropout probabilities for nvidia model.")
 flags.DEFINE_string('cnn_model', 'nvidia',
                     "cnn model either nvidia or commaai")
@@ -53,8 +53,17 @@ def load_image(log_path, filename):
         filename = log_path+'/IMG/'+PurePosixPath(filename).name
     img = cv2.imread(filename)
     # return cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    # return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    # return cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
+
+
+def randomise_image_brightness(image):
+    hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+    # brightness
+    bv = .3 + np.random.random()
+    hsv[::2] = hsv[::2]*bv
+
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
 
 def crop_camera(img, crop_height=66, crop_width=200):
@@ -72,19 +81,18 @@ def crop_camera(img, crop_height=66, crop_width=200):
 # used this routine from https://github.com/mvpcom/Udacity-CarND-Project-3
 def jitter_image_rotation(image, steering):
     rows, cols, _ = image.shape
-    #transRange = 100
-    transRange = 50
-    numPixels = 6
+    transRange = 100
+    numPixels = 10
     valPixels = 0.4
     transX = transRange * np.random.uniform() - transRange/2
     steering = steering + transX/transRange * 2 * valPixels
     transY = numPixels * np.random.uniform() - numPixels/2
     transMat = np.float32([[1, 0, transX], [0, 1, transY]])
     image = cv2.warpAffine(image, transMat, (cols, rows))
-    return (image, steering)
+    return image, steering
 
 
-def filter_driving_straight(data_df, hist_items=5):
+def filter_driving_straight(data_df, hist_items=3):
     print('filtering straight line driving with %d frames consective' %
           hist_items)
     steering_history = deque([])
@@ -114,8 +122,8 @@ def jitter_camera_image(row, log_path, cameras):
     steering += steering_adj[camera]
 
     image = load_image(log_path, getattr(row, camera))
-    if camera == 'center':
-        image, steering = jitter_image_rotation(image, steering)
+    image, steering = jitter_image_rotation(image, steering)
+    image = randomise_image_brightness(image)
 
     return image, steering
 
@@ -154,10 +162,10 @@ def gen_train_data(log_path='./data', log_file='driving_log.csv', skiprows=1,
 
             image, steering = jitter_camera_image(row, log_path, cameras)
 
-            # flip 50% randomily
-            # if random.random() >= .5:
-            #     image = cv2.flip(image, 1)
-            #     steering = -steering
+            # flip 50% randomily that are not driving straight
+            if random.random() >= .5 and steering != 0.0:
+                image = cv2.flip(image, 1)
+                steering = -steering
 
             if crop_image:
                 image = crop_camera(image)
@@ -261,7 +269,6 @@ def build_nvidia_model(img_height=66, img_width=200, img_channels=3,
                                 border_mode=padding[l],
                                 subsample=strides[l],
                                 activation='elu'))
-        # model.add(MaxPooling2D(pool_size=pool_size))
         model.add(Dropout(dropout))
 
     model.add(Flatten())
@@ -291,7 +298,7 @@ def get_callbacks():
     # return [checkpoint, tensorboard]
 
     earlystopping = EarlyStopping(monitor='val_loss', min_delta=0,
-                                  patience=0, verbose=0, mode='auto')
+                                  patience=1, verbose=1, mode='auto')
     return [earlystopping, checkpoint]
 
 
@@ -317,8 +324,8 @@ def main(_):
 
     model.fit_generator(
         gen_train_data(log_path=FLAGS.training_log_path,
-                       # cameras=cameras,
-                       cameras=camera_centre,
+                       cameras=cameras,
+                    #    cameras=camera_centre,
                        crop_image=crop_image,
                        batch_size=FLAGS.batch_size
                        ),
