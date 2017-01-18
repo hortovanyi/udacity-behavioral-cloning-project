@@ -58,7 +58,7 @@ Before being fed into the model, the images are cropped to 66x200 starting at he
 ![Cropped left, centre and right camera image](https://raw.githubusercontent.com/hortovanyi/udacity-behavioral-cloning-project/master/images/3cameras.png)
 
 As seen in the following histogram a significant proportion of the data is for driving straight and its lopsided to left turns (being a negative steering angle is left) when using data generated following my conservative driving laps.
-https://raw.githubusercontent.com/hortovanyi/udacity-behavioral-cloning-project/master/images/steering_histogram.png
+![Steering Angle Histogram](https://raw.githubusercontent.com/hortovanyi/udacity-behavioral-cloning-project/master/images/steering_histogram.png)
 
 The log file was preprocessed to remove contiguous rows with a history of >5 records, with a 0.0 steering angle. This was the only preprocessing done outside of the batch generators used in training (random rows are augmented/jittered for each batch at model training time).
 
@@ -75,14 +75,14 @@ Finally images are cropped per above before being batched.
 
 Data was captured from the simulator. I drove conservatively around the track three times paying particular attention to the sharp right turn. I found connecting a PS3 controller allowed finer control then using the keyboard. At least once I waited till the last moment before taking the turn. This seems to have stopped the car ending up in the lake. Its also helped to overcome a symptom of the bias in the training data towards left turns. To further offset this risk, I validated the training using a test set I'd captured from the second track, which is a lot more windy.
 
-####Training sample captured of left, centre and right cameras cropped
+####[Training sample captured of left, centre and right cameras cropped](https://github.com/hortovanyi/udacity-behavioral-cloning-project/blob/master/simulator_run1.mp4?raw=true)
 <video width="960" height="150" controls>
   <source src="https://github.com/hortovanyi/udacity-behavioral-cloning-project/blob/master/simulator_run1.mp4?raw=true">
 </video>
 
 Center camera has the steering angle and 1/r values displayed.
 
-####Validation sample captured of left, centre and right cameras cropped
+####[Validation sample captured of left, centre and right cameras cropped](https://github.com/hortovanyi/udacity-behavioral-cloning-project/blob/master/simulator_runt2.mp4?raw=true)
 <video width="960" height="150" controls>
   <source src="https://github.com/hortovanyi/udacity-behavioral-cloning-project/blob/master/simulator_runt2.mp4?raw=true">
 </video>
