@@ -6,18 +6,14 @@ import json
 import random
 
 from pathlib import PurePosixPath
-from keras.models import Sequential
-
-from keras.layers import Dense, Dropout, Activation, Flatten, Lambda, ELU
-from keras.layers import Convolution2D, MaxPooling2D
-from keras.optimizers import Adam
-from keras.utils import np_utils
-from keras.utils.visualize_util import plot
-from keras.preprocessing.image import ImageDataGenerator
-from keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping
 from collections import deque
-from scipy.stats import norm
-from sklearn.model_selection import train_test_split
+
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, Flatten, Lambda, ELU
+from keras.layers import Convolution2D
+from keras.optimizers import Adam
+from keras.utils.visualize_util import plot
+from keras.callbacks import TensorBoard, ModelCheckpoint, EarlyStopping
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -54,18 +50,21 @@ def load_image(log_path, filename):
     img = cv2.imread(filename)
     # return cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    # return cv2.cvtColor(img, cv2.COLOR_BGR2YUV)
 
 
+# randomily change the image brightness
 def randomise_image_brightness(image):
     hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
-    # brightness
-    bv = .3 + np.random.random()
+    # brightness - referenced Vivek Yadav post
+    # https://chatbotslife.com/using-augmentation-to-mimic-human-driving-496b569760a9#.yh93soib0
+
+    bv = .25 + np.random.uniform()
     hsv[::2] = hsv[::2]*bv
 
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
 
+# crop camera image to fit nvidia model input shape
 def crop_camera(img, crop_height=66, crop_width=200):
     height = img.shape[0]
     width = img.shape[1]
@@ -78,7 +77,8 @@ def crop_camera(img, crop_height=66, crop_width=200):
     return img[y_start:y_start+crop_height, x_start:x_start+crop_width]
 
 
-# used this routine from https://github.com/mvpcom/Udacity-CarND-Project-3
+# referenced Vivek Yadav post
+# https://chatbotslife.com/using-augmentation-to-mimic-human-driving-496b569760a9#.yh93soib0
 def jitter_image_rotation(image, steering):
     rows, cols, _ = image.shape
     transRange = 100
@@ -92,7 +92,8 @@ def jitter_image_rotation(image, steering):
     return image, steering
 
 
-def filter_driving_straight(data_df, hist_items=3):
+# if driving in a straight line remove extra rows
+def filter_driving_straight(data_df, hist_items=5):
     print('filtering straight line driving with %d frames consective' %
           hist_items)
     steering_history = deque([])
@@ -111,9 +112,11 @@ def filter_driving_straight(data_df, hist_items=3):
         if steering_history.count(0.0) == hist_items:
             drop_rows.append(idx)
 
+    # return the dataframe minus straight lines that met criteria
     return data_df.drop(data_df.index[drop_rows])
 
 
+# jitter random camera image, adjust steering and randomise brightness
 def jitter_camera_image(row, log_path, cameras):
     steering = getattr(row, 'steering')
 
@@ -128,11 +131,12 @@ def jitter_camera_image(row, log_path, cameras):
     return image, steering
 
 
+# create a training data generator for keras fit_model
 def gen_train_data(log_path='./data', log_file='driving_log.csv', skiprows=1,
                    cameras=cameras, filter_straights=False,
                    crop_image=True, batch_size=128):
 
-    # load and iterate over the csv log file
+    # load the csv log file
     print("Cameras: ", cameras)
     print("Log path: ", log_path)
     print("Log file: ", log_file)
@@ -163,7 +167,7 @@ def gen_train_data(log_path='./data', log_file='driving_log.csv', skiprows=1,
             image, steering = jitter_camera_image(row, log_path, cameras)
 
             # flip 50% randomily that are not driving straight
-            if random.random() >= .5 and steering != 0.0:
+            if random.random() >= .5 and abs(steering) > 0.1:
                 image = cv2.flip(image, 1)
                 steering = -steering
 
@@ -177,11 +181,13 @@ def gen_train_data(log_path='./data', log_file='driving_log.csv', skiprows=1,
         yield (np.array(features), np.array(labels))
 
 
+# create a valdiation data generator for keras fit_model
 def gen_val_data(log_path='/u200/Udacity/behavioral-cloning-project/data',
                  log_file='driving_log.csv', camera=camera_centre[0],
                  crop_image=True, skiprows=1,
                  batch_size=128):
 
+    # load the csv log file
     print("Camera: ", camera)
     print("Log path: ", log_path)
     print("Log file: ", log_file)
@@ -250,19 +256,22 @@ def build_commaai_model():
 def build_nvidia_model(img_height=66, img_width=200, img_channels=3,
                        dropout=.4):
 
-    img_shape = (img_height, img_width, img_channels)
+    # build sequential model
+    model = Sequential()
 
+    # normalisation layer
+    img_shape = (img_height, img_width, img_channels)
+    model.add(Lambda(lambda x: x * 1./127.5 - 1,
+                     input_shape=(img_shape),
+                     output_shape=(img_shape), name='Normalization'))
+
+    # convolution layers with dropout
     nb_filters = [24, 36, 48, 64, 64]
     kernel_size = [(5, 5), (5, 5), (5, 5), (3, 3), (3, 3)]
     same, valid = ('same', 'valid')
     padding = [valid, valid, valid, valid, valid]
     strides = [(2, 2), (2, 2), (2, 2), (1, 1), (1, 1)]
-    pool_size = (2, 2)
 
-    model = Sequential()
-    model.add(Lambda(lambda x: x * 1./127.5 - 1,
-                     input_shape=(img_shape),
-                     output_shape=(img_shape), name='Normalization'))
     for l in range(len(nb_filters)):
         model.add(Convolution2D(nb_filters[l],
                                 kernel_size[l][0], kernel_size[l][1],
@@ -271,13 +280,16 @@ def build_nvidia_model(img_height=66, img_width=200, img_channels=3,
                                 activation='elu'))
         model.add(Dropout(dropout))
 
+    # flatten layer
     model.add(Flatten())
 
+    # fully connected layers with dropout
     neurons = [100, 50, 10]
     for l in range(len(neurons)):
         model.add(Dense(neurons[l], activation='elu'))
         model.add(Dropout(dropout))
 
+    # logit output - steering angle
     model.add(Dense(1, activation='elu', name='Out'))
 
     optimizer = Adam(lr=0.001)
@@ -287,10 +299,10 @@ def build_nvidia_model(img_height=66, img_width=200, img_channels=3,
 
 
 def get_callbacks():
-    checkpoint = ModelCheckpoint(
-        "checkpoints/model-{val_loss:.4f}.h5",
-        monitor='val_loss', verbose=1, save_weights_only=True,
-        save_best_only=True)
+    # checkpoint = ModelCheckpoint(
+    #     "checkpoints/model-{val_loss:.4f}.h5",
+    #     monitor='val_loss', verbose=1, save_weights_only=True,
+    #     save_best_only=True)
 
     # tensorboard = TensorBoard(log_dir='./logs', histogram_freq=0,
     #                           write_graph=True, write_images=False)
@@ -299,7 +311,8 @@ def get_callbacks():
 
     earlystopping = EarlyStopping(monitor='val_loss', min_delta=0,
                                   patience=1, verbose=1, mode='auto')
-    return [earlystopping, checkpoint]
+    # return [earlystopping, checkpoint]
+    return [earlystopping]
 
 
 def main(_):
@@ -325,7 +338,7 @@ def main(_):
     model.fit_generator(
         gen_train_data(log_path=FLAGS.training_log_path,
                        cameras=cameras,
-                    #    cameras=camera_centre,
+                       #    cameras=camera_centre,
                        crop_image=crop_image,
                        batch_size=FLAGS.batch_size
                        ),
